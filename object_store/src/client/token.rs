@@ -33,8 +33,9 @@ pub struct TemporaryToken<T> {
 /// [`TemporaryToken`] based on its expiry
 #[derive(Debug)]
 pub struct TokenCache<T> {
-    cache: Mutex<Option<TemporaryToken<T>>>,
+    cache: Mutex<Option<(TemporaryToken<T>, Instant)>>,
     min_ttl: Duration,
+    fetch_backoff: Duration,
 }
 
 impl<T> Default for TokenCache<T> {
@@ -42,13 +43,16 @@ impl<T> Default for TokenCache<T> {
         Self {
             cache: Default::default(),
             min_ttl: Duration::from_secs(300),
+            // How long to wait before re-attempting a token fetch after receiving one that
+            // is still within the min-ttl
+            fetch_backoff: Duration::from_millis(100),
         }
     }
 }
 
 impl<T: Clone + Send> TokenCache<T> {
     /// Override the minimum remaining TTL for a cached token to be used
-    #[cfg(feature = "aws")]
+    #[cfg(any(feature = "aws", feature = "gcp"))]
     pub fn with_min_ttl(self, min_ttl: Duration) -> Self {
         Self { min_ttl, ..self }
     }
@@ -61,19 +65,24 @@ impl<T: Clone + Send> TokenCache<T> {
         let now = Instant::now();
         let mut locked = self.cache.lock().await;
 
-        if let Some(cached) = locked.as_ref() {
+        if let Some((cached, fetched_at)) = locked.as_ref() {
             match cached.expiry {
-                Some(ttl) if ttl.checked_duration_since(now).unwrap_or_default() > self.min_ttl => {
-                    return Ok(cached.token.clone());
+                Some(ttl) => {
+                    if ttl.checked_duration_since(now).unwrap_or_default() > self.min_ttl ||
+                        // if we've recently attempted to fetch this token and it's not actually
+                        // expired, we'll wait to re-fetch it and return the cached one
+                        (fetched_at.elapsed() < self.fetch_backoff && ttl.checked_duration_since(now).is_some())
+                    {
+                        return Ok(cached.token.clone());
+                    }
                 }
                 None => return Ok(cached.token.clone()),
-                _ => (),
             }
         }
 
         let cached = f().await?;
         let token = cached.token.clone();
-        *locked = Some(cached);
+        *locked = Some((cached, Instant::now()));
 
         Ok(token)
     }
