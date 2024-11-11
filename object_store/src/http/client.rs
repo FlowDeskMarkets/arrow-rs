@@ -113,7 +113,7 @@ impl Client {
 
     fn path_url(&self, location: &Path) -> Url {
         let mut url = self.url.clone();
-        url.path_segments_mut().unwrap().extend(location.parts());
+        url.path_segments_mut().unwrap().pop_if_empty().extend(location.parts());
         url
     }
 
