@@ -119,6 +119,7 @@ pub fn header_meta(
 
     let content_length = headers
         .get(CONTENT_LENGTH)
+        .or_else(|| headers.get("x-goog-stored-content-length"))
         .context(MissingContentLengthSnafu)?;
 
     let content_length = content_length.to_str().context(BadHeaderSnafu)?;
